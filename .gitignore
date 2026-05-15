@@ -1,0 +1,15 @@
+# Rust / contract
+contract/target/
+*.wasm
+
+# Python
+backend/__pycache__/
+backend/venv/
+backend/*.db
+*.pyc
+
+# Docker
+.env
+
+# Node
+node_modules/
