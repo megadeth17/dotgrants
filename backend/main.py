@@ -1,10 +1,12 @@
 """
 DotGrants Backend API
-FastAPI server that interfaces with the DotGrants ink! contract on local Substrate node.
+FastAPI server that interfaces with the DotGrants ink! contract via cargo-contract CLI.
 """
 import json
 import os
+import re
 import sqlite3
+import subprocess
 from pathlib import Path
 from typing import Optional
 
@@ -13,13 +15,15 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import uvicorn
 
-# ── Config ──────────────────────────────────────────────────────────────────
-NODE_URL   = os.getenv("NODE_URL", "ws://127.0.0.1:9944")
-CONTRACT   = os.getenv("CONTRACT_ADDRESS", "")   # set after deploy
-ABI_PATH   = Path(os.getenv("ABI_PATH", "/root/dotgrants/target/ink/dotgrants.json"))
-DB_PATH    = Path(os.getenv("DB_PATH", "/root/dotgrants-app/backend/grants.db"))
+# ── Config ───────────────────────────────────────────────────────────────────
+NODE_URL      = os.getenv("NODE_URL", "ws://127.0.0.1:9944")
+CONTRACT      = os.getenv("CONTRACT_ADDRESS", "5EdB8JZZYC3JyCeivXkHU24kGVWvypCsCZA4vMmCmcmq1Jsk")
+CONTRACT_DIR  = os.getenv("CONTRACT_DIR",  "/root/dotgrants")
+DB_PATH       = Path(os.getenv("DB_PATH", "/root/dotgrants-app/backend/grants.db"))
+CARGO         = os.getenv("CARGO_BIN", "/root/.cargo/bin/cargo")
+SURI          = "//Alice"   # read-only calls — any funded account works
 
-# ── Database ─────────────────────────────────────────────────────────────────
+# ── Database ──────────────────────────────────────────────────────────────────
 def get_db():
     conn = sqlite3.connect(str(DB_PATH))
     conn.row_factory = sqlite3.Row
@@ -46,22 +50,111 @@ def init_db():
     conn.commit()
     conn.close()
 
-# ── Substrate interface ───────────────────────────────────────────────────────
-def get_substrate():
-    from substrateinterface import SubstrateInterface
-    return SubstrateInterface(url=NODE_URL)
-
-def get_contract_instance(substrate):
-    from substrateinterface.contracts import ContractInstance
+# ── cargo contract CLI bridge ─────────────────────────────────────────────────
+def cargo_call(message: str, args: list[str] | None = None) -> dict:
+    """
+    Run `cargo contract call --output-json` and return the parsed JSON data.
+    Raises HTTPException on failure.
+    """
     if not CONTRACT:
-        raise HTTPException(503, "Contract not deployed yet — set CONTRACT_ADDRESS env var")
-    with open(ABI_PATH) as f:
-        metadata = json.load(f)
-    return ContractInstance(
-        contract_address=CONTRACT,
-        metadata=metadata,
-        substrate=substrate,
-    )
+        raise HTTPException(503, "Contract address not set. POST /deploy first.")
+
+    cmd = [
+        CARGO, "contract", "call",
+        "--contract", CONTRACT,
+        "--message",  message,
+        "--suri",     SURI,
+        "--url",      NODE_URL,
+        "--output-json",
+    ]
+    if args:
+        cmd += ["--args"] + args
+
+    env = {**os.environ, "PATH": f"/root/.cargo/bin:{os.environ.get('PATH', '')}"}
+    proc = subprocess.run(cmd, capture_output=True, text=True, cwd=CONTRACT_DIR, env=env)
+
+    # cargo-contract writes warnings to stderr, JSON to stdout
+    raw = proc.stdout.strip()
+    if not raw:
+        raise HTTPException(500, f"cargo contract call returned no output: {proc.stderr[:400]}")
+
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        # strip leading warning lines and try again
+        lines = [l for l in proc.stdout.splitlines() if l.strip().startswith("{")]
+        if lines:
+            return json.loads(lines[0])
+        raise HTTPException(500, f"Cannot parse JSON: {proc.stdout[:400]}")
+
+# ── JSON → Python type extractors ─────────────────────────────────────────────
+def _unwrap(node: dict):
+    """Recursively unwrap cargo-contract JSON value nodes into Python scalars."""
+    if node is None:
+        return None
+    if "Literal" in node:
+        return node["Literal"]
+    if "UInt" in node:
+        return node["UInt"]
+    if "Bool" in node:
+        return node["Bool"]
+    if "Tuple" in node:
+        t = node["Tuple"]
+        ident  = t.get("ident", "")
+        values = t.get("values", [])
+        if ident == "Ok":
+            return _unwrap(values[0]) if values else None
+        if ident == "Some":
+            return _unwrap(values[0]) if values else None
+        if ident == "None":
+            return None
+        # enum variant with no fields (e.g. Open, Approved, Reclaimed)
+        if not values:
+            return ident
+        return {ident: [_unwrap(v) for v in values]}
+    if "Map" in node:
+        return {k: _unwrap(v) for k, v in node["Map"].items()}
+    if "Seq" in node:
+        return [_unwrap(e) for e in node["Seq"].get("elems", [])]
+    return node
+
+def _extract(result: dict):
+    """Extract the Ok(..) value from a cargo-contract JSON result."""
+    return _unwrap(result.get("data", {}))
+
+def _hex_bytes(seq) -> str:
+    """Convert a list of ints (byte array from contract) to hex string."""
+    if isinstance(seq, list):
+        return bytes(seq).hex()
+    return str(seq)
+
+# ── Parsers ───────────────────────────────────────────────────────────────────
+def parse_grant(raw: dict) -> dict | None:
+    """raw = cargo_call result dict; returns normalized grant or None."""
+    value = _extract(raw)   # Ok(Some(Grant{...})) → dict or None
+    if value is None:
+        return None
+    approved = value.get("approved_builder")
+    return {
+        "funder":           value.get("funder", ""),
+        "amount":           str(value.get("amount", 0)),
+        "metadata_hash":    _hex_bytes(value.get("metadata_hash", [])),
+        "deadline":         value.get("deadline", 0),
+        "status":           value.get("status", ""),
+        "approved_builder": approved if isinstance(approved, str) else None,
+    }
+
+def parse_application(raw: dict) -> dict | None:
+    value = _extract(raw)
+    if value is None:
+        return None
+    return {
+        "applicant":     value.get("applicant", ""),
+        "proposal_hash": _hex_bytes(value.get("proposal_hash", [])),
+    }
+
+def parse_u64(raw: dict) -> int:
+    return int(_extract(raw) or 0)
 
 # ── Models ────────────────────────────────────────────────────────────────────
 class GrantMeta(BaseModel):
@@ -94,7 +187,6 @@ def health():
 # ── Deployment ────────────────────────────────────────────────────────────────
 @app.post("/deploy")
 def set_deployment(req: DeployRequest):
-    """Register the deployed contract address."""
     global CONTRACT
     CONTRACT = req.contract_address
     conn = get_db()
@@ -107,24 +199,20 @@ def set_deployment(req: DeployRequest):
 @app.get("/grants/count")
 def grant_count():
     try:
-        substrate = get_substrate()
-        contract  = get_contract_instance(substrate)
-        result    = contract.read(substrate, "get_grant_count", args={})
-        return {"count": result.contract_result_data.value}
+        count = parse_u64(cargo_call("get_grant_count"))
+        return {"count": count}
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(500, str(e))
 
 @app.get("/grants/{grant_id}")
 def get_grant(grant_id: int):
     try:
-        substrate = get_substrate()
-        contract  = get_contract_instance(substrate)
-        result    = contract.read(substrate, "get_grant", args={"grant_id": grant_id})
-        grant     = result.contract_result_data.value
+        grant = parse_grant(cargo_call("get_grant", [str(grant_id)]))
         if grant is None:
             raise HTTPException(404, "Grant not found")
 
-        # Merge with off-chain metadata
         conn = get_db()
         meta = conn.execute(
             "SELECT * FROM grants_meta WHERE grant_id=?", (grant_id,)
@@ -133,15 +221,15 @@ def get_grant(grant_id: int):
 
         return {
             "grant_id":         grant_id,
-            "funder":           str(grant["funder"]),
-            "amount":           str(grant["amount"]),
+            "funder":           grant["funder"],
+            "amount":           grant["amount"],
             "deadline":         grant["deadline"],
-            "status":           str(grant["status"]),
-            "approved_builder": str(grant.get("approved_builder", "")) if grant.get("approved_builder") else None,
-            "metadata_hash":    grant["metadata_hash"].hex() if isinstance(grant.get("metadata_hash"), bytes) else str(grant.get("metadata_hash", "")),
-            "title":            meta["title"] if meta else f"Grant #{grant_id}",
+            "status":           grant["status"],
+            "approved_builder": grant["approved_builder"],
+            "metadata_hash":    grant["metadata_hash"],
+            "title":            meta["title"]       if meta else f"Grant #{grant_id}",
             "description":      meta["description"] if meta else "",
-            "tags":             meta["tags"] if meta else "",
+            "tags":             meta["tags"]        if meta else "",
         }
     except HTTPException:
         raise
@@ -150,67 +238,54 @@ def get_grant(grant_id: int):
 
 @app.get("/grants")
 def list_grants():
-    """List all grants (chain count + off-chain metadata)."""
     try:
-        substrate = get_substrate()
-        contract  = get_contract_instance(substrate)
-        count_res = contract.read(substrate, "get_grant_count", args={})
-        count     = count_res.contract_result_data.value or 0
-
+        count = parse_u64(cargo_call("get_grant_count"))
+        conn  = get_db()
         grants = []
         for i in range(count):
             try:
-                result = contract.read(substrate, "get_grant", args={"grant_id": i})
-                g = result.contract_result_data.value
-                if g:
-                    grants.append({
-                        "grant_id": i,
-                        "funder":   str(g["funder"]),
-                        "amount":   str(g["amount"]),
-                        "status":   str(g["status"]),
-                        "deadline": g["deadline"],
-                    })
+                grant = parse_grant(cargo_call("get_grant", [str(i)]))
+                if grant is None:
+                    continue
+                meta = conn.execute(
+                    "SELECT * FROM grants_meta WHERE grant_id=?", (i,)
+                ).fetchone()
+                grants.append({
+                    "grant_id":    i,
+                    "funder":      grant["funder"],
+                    "amount":      grant["amount"],
+                    "status":      grant["status"],
+                    "deadline":    grant["deadline"],
+                    "title":       meta["title"]       if meta else f"Grant #{i}",
+                    "description": meta["description"] if meta else "",
+                    "tags":        meta["tags"]        if meta else "",
+                })
             except Exception:
                 continue
-
-        # Merge off-chain meta
-        conn = get_db()
-        for grant in grants:
-            meta = conn.execute(
-                "SELECT * FROM grants_meta WHERE grant_id=?", (grant["grant_id"],)
-            ).fetchone()
-            if meta:
-                grant["title"]       = meta["title"]
-                grant["description"] = meta["description"]
-                grant["tags"]        = meta["tags"]
-            else:
-                grant["title"]       = f"Grant #{grant['grant_id']}"
-                grant["description"] = ""
-                grant["tags"]        = ""
         conn.close()
         return {"grants": grants, "total": count}
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(500, str(e))
 
 @app.get("/grants/{grant_id}/applications")
 def get_applications(grant_id: int):
     try:
-        substrate = get_substrate()
-        contract  = get_contract_instance(substrate)
-        count_res = contract.read(substrate, "get_application_count", args={"grant_id": grant_id})
-        count     = count_res.contract_result_data.value or 0
-
-        apps = []
+        count = parse_u64(cargo_call("get_application_count", [str(grant_id)]))
+        apps  = []
         for i in range(count):
-            res = contract.read(substrate, "get_application", args={"grant_id": grant_id, "idx": i})
-            a   = res.contract_result_data.value
-            if a:
-                apps.append({
-                    "index":         i,
-                    "applicant":     str(a["applicant"]),
-                    "proposal_hash": a["proposal_hash"].hex() if isinstance(a.get("proposal_hash"), bytes) else str(a.get("proposal_hash", "")),
-                })
+            try:
+                app_data = parse_application(
+                    cargo_call("get_application", [str(grant_id), str(i)])
+                )
+                if app_data:
+                    apps.append({"index": i, **app_data})
+            except Exception:
+                continue
         return {"grant_id": grant_id, "applications": apps, "count": count}
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(500, str(e))
 
@@ -230,17 +305,18 @@ def save_meta(grant_id: int, meta: GrantMeta):
     conn.close()
     return {"saved": True, "grant_id": grant_id}
 
-# ── Node info ──────────────────────────────────────────────────────────────────
+# ── Node info (uses substrate-interface, OK for basic RPC) ────────────────────
 @app.get("/node/info")
 def node_info():
     try:
-        substrate = get_substrate()
-        header = substrate.get_block_header()
+        from substrateinterface import SubstrateInterface
+        si     = SubstrateInterface(url=NODE_URL, ss58_format=42)
+        header = si.get_block_header()
         return {
-            "connected": True,
-            "url": NODE_URL,
+            "connected":    True,
+            "url":          NODE_URL,
             "block_number": header["header"]["number"],
-            "block_hash": str(substrate.get_block_hash()),
+            "block_hash":   str(si.get_block_hash()),
         }
     except Exception as e:
         return {"connected": False, "error": str(e)}
