@@ -87,6 +87,54 @@ def cargo_call(message: str, args: list[str] | None = None) -> dict:
             return json.loads(lines[0])
         raise HTTPException(500, f"Cannot parse JSON: {proc.stdout[:400]}")
 
+
+def cargo_execute(message: str, args: list[str] | None = None,
+                  suri: str = "//Alice", value: str | None = None) -> dict:
+    """
+    Run `cargo contract call --execute --output-json` for state-changing calls.
+    Returns parsed JSON or raises HTTPException.
+    """
+    if not CONTRACT:
+        raise HTTPException(503, "Contract address not set.")
+
+    cmd = [
+        CARGO, "contract", "call",
+        "--contract", CONTRACT,
+        "--message",  message,
+        "--suri",     suri,
+        "--url",      NODE_URL,
+        "--output-json",
+        "--execute",
+        "--skip-confirm",
+    ]
+    if args:
+        cmd += ["--args"] + args
+    if value:
+        cmd += ["--value", value]
+
+    env = {**os.environ, "PATH": f"/root/.cargo/bin:{os.environ.get('PATH', '')}"}
+    proc = subprocess.run(cmd, capture_output=True, text=True, cwd=CONTRACT_DIR, env=env,
+                          timeout=60)
+
+    raw = proc.stdout.strip()
+    if proc.returncode != 0 and not raw:
+        raise HTTPException(500, f"Transaction failed: {proc.stderr[:500]}")
+
+    try:
+        parsed = json.loads(raw)
+        # cargo contract call --execute returns a list of events
+        if isinstance(parsed, list):
+            return {"status": "ok", "events": parsed}
+        return parsed
+    except json.JSONDecodeError:
+        lines = [l for l in proc.stdout.splitlines() if l.strip().startswith("{")]
+        if lines:
+            return json.loads(lines[-1])
+        # If no JSON but returncode 0, tx might have succeeded
+        if proc.returncode == 0:
+            return {"status": "ok", "output": proc.stdout[:300]}
+        raise HTTPException(500, f"Cannot parse tx result: {proc.stdout[:400]} | stderr: {proc.stderr[:200]}")
+
 # ── JSON → Python type extractors ─────────────────────────────────────────────
 def _unwrap(node: dict):
     """Recursively unwrap cargo-contract JSON value nodes into Python scalars."""
@@ -162,6 +210,22 @@ class GrantMeta(BaseModel):
     title:       str
     description: Optional[str] = ""
     tags:        Optional[str] = ""
+
+
+class CreateGrantRequest(BaseModel):
+    title: str
+    description: Optional[str] = ""
+    tags: Optional[str] = ""
+    amount: int  # in planck
+    deadline: int  # unix timestamp ms
+    suri: Optional[str] = "//Alice"
+
+class ApplyRequest(BaseModel):
+    proposal: str
+    suri: Optional[str] = "//Alice"
+
+class ApproveRequest(BaseModel):
+    suri: Optional[str] = "//Alice"
 
 class DeployRequest(BaseModel):
     contract_address: str
@@ -304,6 +368,118 @@ def save_meta(grant_id: int, meta: GrantMeta):
     conn.commit()
     conn.close()
     return {"saved": True, "grant_id": grant_id}
+
+
+
+# ── Execute endpoints (demo mode — uses dev account) ─────────────────────────
+import hashlib
+
+@app.post("/grants/create")
+def create_grant_tx(req: CreateGrantRequest):
+    """Create a grant on-chain. Demo mode: signs with //Alice or provided suri."""
+    try:
+        # Hash metadata
+        meta_str = json.dumps({"title": req.title, "description": req.description, "tags": req.tags})
+        meta_hash = hashlib.sha256(meta_str.encode()).digest()
+        # Convert to list of ints for ink! [u8; 32]
+        hash_arr = "[" + ",".join(str(b) for b in meta_hash) + "]"
+
+        result = cargo_execute(
+            "create_grant",
+            args=[hash_arr, str(req.deadline)],
+            suri=req.suri,
+            value=str(req.amount),
+        )
+
+        # Try to extract grant_id from events
+        grant_id = None
+        events = result.get("events", [])
+        for ev in events:
+            if "GrantCreated" in str(ev):
+                # Try to find grant_id in event data
+                if isinstance(ev, dict):
+                    data = ev.get("data", {})
+                    if isinstance(data, dict) and "grant_id" in data:
+                        grant_id = data["grant_id"]
+
+        # If can't extract from events, get count - 1
+        if grant_id is None:
+            try:
+                count = parse_u64(cargo_call("get_grant_count"))
+                grant_id = count - 1
+            except Exception:
+                grant_id = -1
+
+        # Save off-chain metadata
+        if grant_id >= 0:
+            conn = get_db()
+            conn.execute("""
+                INSERT INTO grants_meta(grant_id, title, description, tags)
+                VALUES(?, ?, ?, ?)
+                ON CONFLICT(grant_id) DO UPDATE SET
+                    title=excluded.title,
+                    description=excluded.description,
+                    tags=excluded.tags
+            """, (grant_id, req.title, req.description, req.tags))
+            conn.commit()
+            conn.close()
+
+        return {"success": True, "grant_id": grant_id, "tx": result}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(500, str(e))
+
+
+@app.post("/grants/{grant_id}/apply")
+def apply_for_grant_tx(grant_id: int, req: ApplyRequest):
+    """Apply for a grant on-chain. Hashes proposal and submits."""
+    try:
+        proposal_hash = hashlib.sha256(req.proposal.encode()).digest()
+        hash_arr = "[" + ",".join(str(b) for b in proposal_hash) + "]"
+
+        result = cargo_execute(
+            "apply_for_grant",
+            args=[str(grant_id), hash_arr],
+            suri=req.suri,
+        )
+        return {"success": True, "grant_id": grant_id, "tx": result}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(500, str(e))
+
+
+@app.post("/grants/{grant_id}/approve/{builder}")
+def approve_applicant_tx(grant_id: int, builder: str, req: ApproveRequest):
+    """Approve a builder and auto-transfer POT."""
+    try:
+        result = cargo_execute(
+            "approve_applicant",
+            args=[str(grant_id), builder],
+            suri=req.suri,
+        )
+        return {"success": True, "grant_id": grant_id, "builder": builder, "tx": result}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(500, str(e))
+
+
+@app.post("/grants/{grant_id}/reclaim")
+def reclaim_grant_tx(grant_id: int, req: ApproveRequest):
+    """Reclaim POT after deadline."""
+    try:
+        result = cargo_execute(
+            "reclaim",
+            args=[str(grant_id)],
+            suri=req.suri,
+        )
+        return {"success": True, "grant_id": grant_id, "tx": result}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(500, str(e))
 
 
 # ── Builder Reputation ───────────────────────────────────────────────────────
