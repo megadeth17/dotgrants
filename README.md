@@ -1,71 +1,102 @@
-# DotGrants — Permissionless Micro-Grants on Portaldot
+# DotGrants — Permissionless Micro-Grants on PortalDot
 
-> **Portaldot Mini Hackathon Season 1 Submission**
+> **PortalDot Mini Hackathon Season 1 Submission**
 
-DotGrants is a fully on-chain, permissionless micro-grants protocol built with [Ink!](https://use.ink) smart contracts on Portaldot. No committees. No governance votes. Anyone can create a grant, any builder can apply, and payment happens automatically on-chain when the funder approves.
+DotGrants is a fully on-chain, permissionless micro-grants protocol built with [ink!](https://use.ink) smart contracts on PortalDot. No committees. No governance votes. Anyone can create a grant, any builder can apply, and payment happens automatically on-chain when the funder approves.
+
+**Every approved grant becomes verifiable builder reputation. Fund once, build a track record forever.**
+
+### Live Demo: [http://178.104.36.180](http://178.104.36.180)
+
+---
+
+## How It Works
+
+```
+1. FUND    → Funder deposits POT as reward → locked in contract
+2. APPLY   → Any builder submits proposal hash on-chain (permissionless)
+3. APPROVE → Funder picks the best builder → POT auto-transfers
+4. TRACK   → Completed grants build on-chain reputation for builders
+```
+
+If deadline passes with no approval → funder reclaims POT. Zero trust assumptions.
 
 ---
 
 ## The Problem
 
-Portaldot has a native `bounties` pallet — but it requires a governance council to approve every payout. This creates friction for individual funders and small teams who just want to reward builders directly.
+PortalDot has a native `bounties` pallet, but it requires a governance council to approve every payout. This creates friction for individual funders and small teams who want to reward builders directly.
 
 ## The Solution
 
-DotGrants removes the middleman:
+DotGrants removes the middleman. Plus, it adds something governance bounties don't have: **a builder reputation layer** derived from on-chain grant history. Every approved grant = verifiable track record.
 
-1. **Funder** creates a grant → deposits POT as reward → sets deadline
-2. **Builder** applies → submits proposal hash on-chain
-3. **Funder** reviews applicants → approves one → POT transfers automatically
-4. If deadline passes with no approval → funder reclaims POT
+---
 
-100% permissionless. Every action is trustless and transparent on-chain.
+## Key Features
+
+| Feature | Description |
+|---------|-------------|
+| **Permissionless Grants** | Anyone can fund or apply. No approval gates. |
+| **On-chain Escrow** | POT locked in contract until approval or deadline reclaim |
+| **Builder Reputation** | Leaderboard computed from on-chain approved grants — verifiable track record |
+| **POT Native** | All transactions use POT as gas and settlement token |
+| **Metadata Hashing** | Proposal details hashed with SHA-256, stored on-chain for integrity |
+| **Auto-transfer** | Approval triggers instant POT transfer to builder |
 
 ---
 
 ## Architecture
 
 ```
-┌─────────────────┐    ┌──────────────────┐    ┌─────────────────────┐
-│  Frontend       │    │  Backend API     │    │  Ink! Contract      │
-│  HTML/JS        │◄──►│  FastAPI         │◄──►│  Portaldot Node     │
-│  Polkadot.js    │    │  substrateinterface│  │  WASM / POT token   │
-└─────────────────┘    └──────────────────┘    └─────────────────────┘
+┌─────────────────┐     ┌──────────────────┐     ┌──────────────────────┐
+│  Frontend       │     │  Backend API     │     │  ink! Contract       │
+│  Vanilla HTML/JS│◄───►│  FastAPI +       │◄───►│  PortalDot Node      │
+│  Orbitron/Exo 2 │     │  cargo-contract  │     │  WASM (19.1K)        │
+│  Polkadot.js    │     │  CLI bridge      │     │  POT as gas          │
+└─────────────────┘     └──────────────────┘     └──────────────────────┘
 ```
 
-| Layer       | Tech                                         |
-|-------------|----------------------------------------------|
-| Contract    | Ink! 5.1.1 (Rust) → WASM                    |
-| Backend     | Python 3.12 + FastAPI + substrateinterface   |
-| Frontend    | Vanilla HTML/CSS/JS + Polkadot.js extension  |
-| Storage     | On-chain (Mapping) + Off-chain (SQLite)      |
-| Node        | substrate-contracts-node (local)             |
+| Layer | Tech | Notes |
+|-------|------|-------|
+| **Contract** | ink! 5.1.1 (Rust) → WASM | 19.1K compiled, 5/5 tests pass |
+| **Backend** | Python + FastAPI + `cargo contract call --output-json` | Subprocess bridge — guaranteed ABI compatibility |
+| **Frontend** | Vanilla HTML/CSS/JS | Orbitron + Exo 2 typography, dark theme |
+| **Storage** | On-chain `Mapping<u64, Grant>` + Off-chain SQLite | Chain = source of truth, SQLite = metadata cache |
+| **Node** | swanky-node v1.7.0 (ARM64) | Local dev node with contracts pallet |
+| **Infra** | Hetzner VPS (ARM64, 4GB) + Docker (nginx:alpine) | Live at 178.104.36.180 |
+
+### Why `cargo-contract` CLI bridge?
+
+Standard Python Substrate SDKs have SCALE codec version mismatches with newer contract pallets. Using `cargo contract call --output-json` via subprocess guarantees ABI compatibility since it uses the same toolchain that compiled the contract. A recursive JSON unwrapper (`_unwrap`) handles the nested `Ok(Some(Tuple(...)))` structure from cargo-contract output.
 
 ---
 
 ## Smart Contract
 
-Located in `contract/lib.rs`. Key storage:
+Located in `contract/lib.rs`.
+
+### Storage
 
 ```rust
-grants:       Mapping<u64, Grant>,
-applications: Mapping<(u64, u64), Application>,  // flat mapping, no Vec<T> issues
-app_counts:   Mapping<u64, u64>,
+grants:        Mapping<u64, Grant>,
+applications:  Mapping<(u64, u64), Application>,  // flat mapping (no Vec<T>)
+app_counts:    Mapping<u64, u64>,
 next_grant_id: u64,
 ```
 
 ### Messages
 
-| Function              | Access   | Description                              |
-|-----------------------|----------|------------------------------------------|
-| `create_grant`        | Anyone   | Payable — deposit POT + set metadata     |
-| `apply_for_grant`     | Anyone   | Submit proposal hash on-chain            |
-| `approve_applicant`   | Funder   | Approve builder → auto-transfer POT      |
-| `reclaim`             | Funder   | Reclaim POT after deadline (if no approval) |
-| `get_grant`           | View     | Read grant state                         |
-| `get_application`     | View     | Read a specific application              |
-| `get_application_count`| View   | Count of applications per grant          |
-| `get_grant_count`     | View     | Total grants created                     |
+| Function | Access | Description |
+|----------|--------|-------------|
+| `create_grant` | Anyone (payable) | Deposit POT + set metadata hash + deadline |
+| `apply_for_grant` | Anyone | Submit proposal hash on-chain |
+| `approve_applicant` | Funder only | Approve builder → auto-transfer POT |
+| `reclaim` | Funder only | Reclaim POT after deadline (if no approval) |
+| `get_grant` | View | Read grant state |
+| `get_application` | View | Read specific application |
+| `get_application_count` | View | Count applications per grant |
+| `get_grant_count` | View | Total grants created |
 
 ### Events
 
@@ -74,6 +105,31 @@ next_grant_id: u64,
 - `GrantApproved { grant_id, builder, amount }`
 - `GrantReclaimed { grant_id, funder, amount }`
 
+### Tests (5/5 pass)
+
+```
+create_grant_works
+apply_works
+zero_amount_fails
+only_funder_can_approve
+non_applicant_cannot_be_approved
+```
+
+---
+
+## API Endpoints
+
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/health` | Health check + contract address |
+| GET | `/node/info` | Block number + connection status |
+| GET | `/grants` | List all grants with metadata |
+| GET | `/grants/{id}` | Grant detail + on-chain state |
+| GET | `/grants/{id}/applications` | Applications for a grant |
+| GET | `/builders/leaderboard` | Builder reputation from chain data |
+| POST | `/grants/{id}/meta` | Save off-chain metadata (title, desc, tags) |
+| POST | `/deploy` | Register new contract address |
+
 ---
 
 ## Running Locally
@@ -81,80 +137,47 @@ next_grant_id: u64,
 ### Prerequisites
 
 - Rust + `cargo-contract` 5.0.3+
-- Python 3.12+
-- `substrate-contracts-node` (local dev node)
-- Docker (optional)
+- Python 3.12+ with `fastapi`, `uvicorn`, `pydantic`
+- swanky-node or substrate-contracts-node
+- Docker (optional, for frontend)
 
-### 1. Build the Contract
+### 1. Build & Test Contract
 
 ```bash
 cd contract
-rustup target add wasm32-unknown-unknown
-rustup component add rust-src
-cargo install cargo-contract --version 5.0.3
 cargo contract build --release
-```
-
-Output: `target/ink/dotgrants.contract` (deploy this)
-
-### 2. Run Tests
-
-```bash
 cargo test
-# 5 tests should pass:
-# create_grant_works
-# apply_works
-# zero_amount_fails
-# only_funder_can_approve
-# non_applicant_cannot_be_approved
 ```
 
-### 3. Start Local Node
+### 2. Start Node
 
 ```bash
-# Download from https://github.com/paritytech/substrate-contracts-node/releases
-substrate-contracts-node --dev --rpc-external --rpc-cors=all
+./swanky-node --dev --rpc-external --rpc-cors=all
 ```
 
-### 4. Deploy Contract
+### 3. Deploy Contract
 
 ```bash
 cargo contract instantiate target/ink/dotgrants.contract \
-  --suri //Alice \
-  --execute \
-  --url ws://127.0.0.1:9944
-# Note the deployed contract address
+  --suri //Alice --execute --url ws://127.0.0.1:9944
 ```
 
-Or use [Contracts UI](https://contracts-ui.substrate.io) for a graphical interface.
-
-### 5. Start Backend
+### 4. Start Backend
 
 ```bash
 cd backend
-python3 -m venv venv
-source venv/bin/activate
-pip install -r requirements.txt
-
-export NODE_URL=ws://127.0.0.1:9944
-export CONTRACT_ADDRESS=<your-deployed-address>
-export ABI_PATH=../contract/target/ink/dotgrants.json
-
-uvicorn main:app --host 0.0.0.0 --port 8000
+export CONTRACT_ADDRESS=<deployed-address>
+python3 -m uvicorn main:app --host 0.0.0.0 --port 8000
 ```
 
-API docs: `http://localhost:8000/docs`
-
-### 6. Open Frontend
-
-Open `frontend/index.html` in a browser, or serve it:
+### 5. Serve Frontend
 
 ```bash
 cd frontend
-python3 -m http.server 80
+docker run -d -p 80:80 -v $(pwd):/usr/share/nginx/html:ro nginx:alpine
 ```
 
-### Docker (all-in-one)
+Or with Docker Compose:
 
 ```bash
 CONTRACT_ADDRESS=<addr> docker-compose up -d
@@ -162,25 +185,18 @@ CONTRACT_ADDRESS=<addr> docker-compose up -d
 
 ---
 
-## API Endpoints
+## POT Usage
 
-| Method | Path                          | Description                    |
-|--------|-------------------------------|--------------------------------|
-| GET    | `/health`                     | Health check                   |
-| GET    | `/node/info`                  | Current block + connection     |
-| GET    | `/grants`                     | List all grants                |
-| GET    | `/grants/{id}`                | Get grant + metadata           |
-| GET    | `/grants/{id}/applications`   | List applications for a grant  |
-| POST   | `/grants/{id}/meta`           | Save off-chain metadata        |
-| POST   | `/deploy`                     | Register contract address      |
+DotGrants uses **POT as gas** for all on-chain transactions (contract deployment, grant creation, applications, approvals, reclaims) and as the **settlement currency** locked in grant escrow. This is a PortalDot-native application — POT is central to every interaction.
 
 ---
 
 ## Why DotGrants?
 
-- **For the ecosystem**: builders need funding, funders need a simple tool — this is the missing layer
-- **For judges**: demonstrates real Ink! contract patterns (Mapping, payable, events, error types)
-- **Narrative**: Portaldot has governance bounties; DotGrants adds the permissionless layer for individuals
+- **For builders**: permissionless funding + on-chain reputation that compounds over time
+- **For funders**: direct, trustless payment without governance overhead
+- **For PortalDot**: missing layer between governance bounties and direct grants
+- **For judges**: real ink! contract patterns (Mapping, payable, events, error handling), real-world market potential (grants infrastructure), live deployed MVP
 
 ---
 
@@ -190,4 +206,4 @@ MIT — open source, free to fork and deploy.
 
 ---
 
-*Built for [Portaldot Mini Hackathon Season 1](https://portaldot.network) — May 2026*
+*Built for [PortalDot Mini Hackathon Season 1](https://portaldot.network) — May 2026*
