@@ -305,6 +305,42 @@ def save_meta(grant_id: int, meta: GrantMeta):
     conn.close()
     return {"saved": True, "grant_id": grant_id}
 
+
+# ── Builder Reputation ───────────────────────────────────────────────────────
+@app.get("/builders/leaderboard")
+def builder_leaderboard():
+    """Compute builder reputation from on-chain grant data."""
+    try:
+        count = parse_u64(cargo_call("get_grant_count"))
+        builders = {}
+        for i in range(count):
+            try:
+                grant = parse_grant(cargo_call("get_grant", [str(i)]))
+                if grant is None:
+                    continue
+                status = (grant.get("status") or "").replace("GrantStatus::", "")
+                builder = grant.get("approved_builder")
+                if status == "Approved" and builder:
+                    if builder not in builders:
+                        builders[builder] = {"address": builder, "grants_completed": 0, "total_earned": 0}
+                    builders[builder]["grants_completed"] += 1
+                    builders[builder]["total_earned"] += int(grant.get("amount", 0))
+            except Exception:
+                continue
+
+        leaderboard = sorted(builders.values(), key=lambda b: b["total_earned"], reverse=True)
+        # Add rank
+        for idx, b in enumerate(leaderboard):
+            b["rank"] = idx + 1
+            b["total_earned_pot"] = str(b["total_earned"] // 10**12)
+            b["total_earned"] = str(b["total_earned"])
+
+        return {"builders": leaderboard, "total_builders": len(leaderboard)}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(500, str(e))
+
 # ── Node info (uses substrate-interface, OK for basic RPC) ────────────────────
 @app.get("/node/info")
 def node_info():

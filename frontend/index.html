@@ -624,6 +624,106 @@ footer a {
 }
 footer a:hover { text-decoration: underline; }
 
+/* ── How it Works ──────────────────────────────────────────────────────── */
+.how-it-works {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 20px;
+  margin: 40px 0 0;
+  padding-top: 32px;
+  border-top: 1px solid var(--border);
+}
+.step {
+  text-align: center;
+  padding: 24px 16px;
+  border-radius: var(--radius);
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  position: relative;
+}
+.step-num {
+  font-family: var(--font-head);
+  font-size: 28px;
+  font-weight: 800;
+  color: var(--accent);
+  margin-bottom: 8px;
+}
+.step h4 {
+  font-family: var(--font-head);
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.5px;
+  margin-bottom: 6px;
+}
+.step p { font-size: 12px; color: var(--muted); line-height: 1.5; }
+
+/* ── Leaderboard ───────────────────────────────────────────────────────── */
+.leaderboard-table {
+  width: 100%;
+  border-collapse: collapse;
+}
+.leaderboard-table th {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  color: var(--muted);
+  padding: 12px 16px;
+  text-align: left;
+  border-bottom: 1px solid var(--border);
+}
+.leaderboard-table td {
+  padding: 14px 16px;
+  font-size: 14px;
+  border-bottom: 1px solid var(--border);
+}
+.leaderboard-table tr:last-child td { border-bottom: none; }
+.leaderboard-table tr:hover td { background: var(--surface); }
+.rank-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  font-family: var(--font-head);
+  font-size: 13px;
+  font-weight: 700;
+}
+.rank-1 { background: linear-gradient(135deg, #fbbf24, #f59e0b); color: #000; }
+.rank-2 { background: linear-gradient(135deg, #94a3b8, #64748b); color: #fff; }
+.rank-3 { background: linear-gradient(135deg, #d97706, #b45309); color: #fff; }
+.rank-default { background: var(--surface3); color: var(--muted); }
+.builder-address {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--accent);
+}
+.builder-stat {
+  font-family: var(--font-head);
+  font-weight: 600;
+  color: var(--text);
+}
+.builder-stat small {
+  font-weight: 400;
+  color: var(--muted);
+  font-family: var(--font-body);
+  font-size: 11px;
+}
+.rep-bar {
+  height: 4px;
+  border-radius: 2px;
+  background: var(--border);
+  overflow: hidden;
+  margin-top: 4px;
+}
+.rep-bar-fill {
+  height: 100%;
+  border-radius: 2px;
+  background: linear-gradient(90deg, var(--accent), var(--accent2));
+  transition: width 500ms var(--ease);
+}
+
 /* ── Reduced Motion ────────────────────────────────────────────────────── */
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation-duration: 0.01ms !important; transition-duration: 0.01ms !important; }
@@ -662,6 +762,7 @@ footer a:hover { text-decoration: underline; }
   <nav>
     <button class="active" onclick="showPage('browse')">Browse</button>
     <button onclick="showPage('create')">Create Grant</button>
+    <button onclick="showPage('builders')">Builders</button>
     <button onclick="showPage('dashboard')">Dashboard</button>
   </nav>
   <div class="node-status">
@@ -693,6 +794,24 @@ footer a:hover { text-decoration: underline; }
       <div class="stat-box">
         <div class="stat-num" id="statApproved">&mdash;</div>
         <div class="stat-label">Funded</div>
+      </div>
+    </div>
+
+    <div class="how-it-works">
+      <div class="step">
+        <div class="step-num">01</div>
+        <h4>Fund a Grant</h4>
+        <p>Deposit POT as reward. Funds lock in the contract until you approve a builder or reclaim after deadline.</p>
+      </div>
+      <div class="step">
+        <div class="step-num">02</div>
+        <h4>Builders Apply</h4>
+        <p>Any builder submits a proposal hash on-chain. Permissionless, no gatekeeping.</p>
+      </div>
+      <div class="step">
+        <div class="step-num">03</div>
+        <h4>Approve &amp; Pay</h4>
+        <p>Funder approves the best builder. POT transfers automatically. On-chain reputation grows.</p>
       </div>
     </div>
   </div>
@@ -767,6 +886,22 @@ footer a:hover { text-decoration: underline; }
   </div>
 </section>
 
+<!-- ══ BUILDERS ═══════════════════════════════════════════════════════ -->
+<section class="page" id="page-builders">
+  <div style="text-align:center;margin-bottom:32px">
+    <h2 style="font-family:var(--font-head);font-size:clamp(20px,3vw,28px);font-weight:700;margin-bottom:8px">Builder Reputation</h2>
+    <p style="color:var(--muted);font-size:14px;max-width:480px;margin:0 auto">Every approved grant builds verifiable on-chain reputation. Fund once, build a track record forever.</p>
+  </div>
+
+  <div class="card">
+    <h2>Leaderboard</h2>
+    <p class="card-meta">Ranked by total POT earned from completed grants on PortalDot.</p>
+    <div id="leaderboardContainer">
+      <div class="empty-state"><p>Loading builders...</p></div>
+    </div>
+  </div>
+</section>
+
 <!-- ══ DASHBOARD ═══════════════════════════════════════════════════════ -->
 <section class="page" id="page-dashboard">
   <div class="wallet-bar">
@@ -815,10 +950,11 @@ function showPage(id) {
   document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
   document.getElementById('page-' + id).classList.add('active');
   document.querySelectorAll('nav button').forEach((b, i) => {
-    const map = ['browse','create','dashboard'];
+    const map = ['browse','create','builders','dashboard'];
     b.classList.toggle('active', map[i] === id);
   });
   if (id === 'browse') loadGrants();
+  if (id === 'builders') loadLeaderboard();
   if (id === 'dashboard') loadDashboard();
   window.scrollTo({ top: 0, behavior: 'smooth' });
 }
@@ -1030,6 +1166,48 @@ async function loadDashboard() {
   grantsList.innerHTML = asGrants.length
     ? '<div class="grants-grid">' + asGrants.map(g => grantCard(g)).join('') + '</div>'
     : '<div class="empty-state"><p>No grants created yet.</p></div>';
+}
+
+// ── Builder Leaderboard ─────────────────────────────────────────────────
+async function loadLeaderboard() {
+  const container = document.getElementById('leaderboardContainer');
+  container.innerHTML = '<div class="empty-state"><p>Loading builders...</p></div>';
+  try {
+    const r = await fetch(API + '/builders/leaderboard');
+    if (!r.ok) throw new Error(await r.text());
+    const { builders, total_builders } = await r.json();
+
+    if (!builders.length) {
+      container.innerHTML = '<div class="empty-state"><p>No builders yet. Be the first to complete a grant.</p></div>';
+      return;
+    }
+
+    const maxEarned = Math.max(...builders.map(b => parseInt(b.total_earned)));
+
+    container.innerHTML = `<table class="leaderboard-table">
+      <thead><tr>
+        <th style="width:60px">Rank</th>
+        <th>Builder</th>
+        <th style="text-align:center">Grants</th>
+        <th style="text-align:right">Total Earned</th>
+      </tr></thead>
+      <tbody>${builders.map(b => {
+        const rankClass = b.rank === 1 ? 'rank-1' : b.rank === 2 ? 'rank-2' : b.rank === 3 ? 'rank-3' : 'rank-default';
+        const pct = maxEarned > 0 ? (parseInt(b.total_earned) / maxEarned * 100) : 0;
+        return `<tr>
+          <td><span class="rank-badge ${rankClass}">${b.rank}</span></td>
+          <td>
+            <div class="builder-address">${b.address.slice(0,8)}...${b.address.slice(-6)}</div>
+            <div class="rep-bar"><div class="rep-bar-fill" style="width:${pct}%"></div></div>
+          </td>
+          <td style="text-align:center"><span class="builder-stat">${b.grants_completed}</span></td>
+          <td style="text-align:right"><span class="builder-stat">${b.total_earned_pot} <small>POT</small></span></td>
+        </tr>`;
+      }).join('')}</tbody>
+    </table>`;
+  } catch (e) {
+    container.innerHTML = `<div class="empty-state" style="color:var(--red)">Error: ${esc(e.message)}</div>`;
+  }
 }
 
 // ── Tx helpers ──────────────────────────────────────────────────────────
